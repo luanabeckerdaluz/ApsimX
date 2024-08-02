@@ -1,62 +1,51 @@
-#' Source: https://www.isric.org/ \cr
-#' Details: https://www.isric.org/explore/soilgrids/faq-soilgrids \cr
-#' 
-#' Pedotransfer functions: Saxton and Rawls, 2006. Soil Water Characteristic Estimates by Texture and Organic Matter for Hydrologic Solutions.
-#' Soil Sci. Soc. Am. J. 70:1569–1578. \cr
-#' 
-#' TODO: need to look into how this is done in APSIM NG
-#' https://github.com/APSIMInitiative/ApsimX/pull/3994/files \cr
-#' 
-#' NOTE: Eric Zurcher provided help by sending me an R file originally written by
-#' Andrew Moore. It provides a bit of context for how some of the decisions
-#' were made for constructing the synthetic soil profiles in APSIM. (email from june 3 2021).
-#' 
-#' @title Generate a synthetic APSIM soil profile from the ISRIC soil database
-#' @description Retrieves soil data from the ISRIC global database and converts it to an APSIM soil_profile object
-#' @name get_isric_soil_profile
-#' @param lonlat Longitude and latitude vector (e.g. c(-93, 42)).
-#' @param statistic default is the mean
-#' @param soil.profile a soil profile to fill in in case the default one is not appropriate
-#' @param find.location.name default is TRUE. Use either maps package or photon API to find Country/State.
-#' If you are running this function many times it might be better to set this to FALSE.
-#' @param fix whether to fix compatibility between saturation and bulk density (default is FALSE).
-#' @param verbose argument passed to the fix function.
-#' @param check whether to check the soil profile (default is TRUE)
-#' @param physical whether soil physical properties are obtained from the data base or through \sQuote{SR}, Saxton and Rawls pedotransfer functions.
-#' @param xargs additional arguments passed to \code{\link{apsimx_soil_profile}} or \sQuote{apsimx:::approx_soil_variable} function. At the moment these are:
-#' \sQuote{soil.bottom}, \sQuote{method} and \sQuote{nlayers}.
-#' @return it generates an object of class \sQuote{soil_profile}.
-#' @details Variable which are directly retrieved and a simple unit conversion is performed: \cr
-#' * Bulk density - bdod \cr
-#' * Carbon - soc \cr
-#' * Clay - clay \cr
-#' * Sand - sand \cr
-#' * PH - phh2o \cr
-#' * Nitrogen - nitrogen \cr
-#' Variables which are optionally estimated using pedotransfer functions: \cr
-#' LL15, DUL, SAT, KS, AirDry \cr
-#' TO-DO: \cr
-#' What do I do with nitrogen? \cr
-#' Can I use CEC? \cr
-#' How can I have a guess at FBiom and Finert? \cr
-#' FBiom does not depend on any soil property at the moment, should it? \cr
-#' @seealso \code{\link{apsimx_soil_profile}}, \code{\link{edit_apsim_replace_soil_profile}}, \code{\link{edit_apsimx_replace_soil_profile}}.
-#' @export
-#' @author Fernando E. Miguez, Eric Zurcher (CSIRO) and Andrew Moore (CSIRO)
-#' @examples 
-#' \dontrun{
-#' ## Only run this if rest.isric.org is working
-#' rest.isric.on <- suppressWarnings(try(readLines("http://rest.isric.org", 
-#' n = 1, warn = FALSE), silent = TRUE))
-#'
-#' ## Get soil profile properties for a single point
-#' if(!inherits(rest.isric.on, "try-error")){
-#'   sp1 <- get_isric_soil_profile(lonlat = c(-93, 42), fix = TRUE, verbose = FALSE)
-#'   ## Visualize
-#'   plot(sp1)
-#'   plot(sp1, property = "water")
-#'  }
-#' }
+library(terra)
+library(sf)
+
+
+
+
+extract_from_files <- function(images_folder, lon, lat) {
+  files <- list.files(images_folder, pattern = ".tif", full.names = TRUE)
+  r <- rast(files)
+  # r_proj <- project(r, "EPSG:152160")
+
+  central_coords <- matrix(c(lon, lat), ncol = 2)
+  pixel_values <- extract(r, central_coords)
+  # pixel_values
+
+  dd <- as.data.frame(t(pixel_values)) %>%
+    dplyr::rename(value = V1) %>%
+    tibble::rownames_to_column(var = "id") %>%
+    tidyr::separate(col = id, into = c("coverage", "depth", "mean"), sep = "_") %>%
+    dplyr::select(-mean) %>%
+    dplyr::arrange(coverage, depth) %>%
+    tidyr::pivot_wider(names_from = "coverage", values_from = "value") %>%
+    mutate(dp = case_when(
+      grepl("0-5cm", depth) ~ 1,
+      grepl("0-30cm", depth) ~ 2,
+      grepl("5-15cm", depth) ~ 3,
+      grepl("15-30cm", depth) ~ 4,
+      grepl("30-60cm", depth) ~ 5,
+      grepl("60-100cm", depth) ~ 6,
+      grepl("100-200cm", depth) ~ 7,
+      .default = 0)
+    ) %>%
+    arrange(dp) %>%
+    select(-dp)
+
+  # dim(dd)
+  # head(dd)
+
+  return(dd)
+}
+
+
+
+# =================================================================================
+# =================================================================================
+# =================================================================================
+
+
 
 get_isric_soil_profile <- function(lonlat, 
                                    statistic = c("mean", "Q0.5"),
@@ -66,6 +55,8 @@ get_isric_soil_profile <- function(lonlat,
                                    verbose = TRUE,
                                    check = TRUE,
                                    physical = c("default", "SR"),
+                                   api_or_image = 'api',
+                                   images_folder = NA,
                                    xargs = NULL){
 
   statistic <- match.arg(statistic)
@@ -75,48 +66,98 @@ get_isric_soil_profile <- function(lonlat,
   lon <- as.numeric(lonlat[1])
   lat <- as.numeric(lonlat[2])
   
+  
+  
   if(lon < -180 || lon > 180) stop("longitude should be between -180 and 180")
   if(lat < -90 || lat > 90) stop("latitude should be between -90 and 90")
-  
-##  rest0 <- "https://rest.soilgrids.org/soilgrids/v2.0/properties/query?lon="
-  rest0 <- "https://rest.isric.org/soilgrids/v2.0/properties/query?lon="
-  rest1 <- paste0(rest0, lon, "&lat=", lat)
-  rest.properties <- paste("&property=bdod", 
-                           "property=soc",
-                           "property=phh2o",
-                           "property=clay", 
-                           "property=sand", 
-                           "property=nitrogen",
-                           "property=cec", 
-                           "property=wv0010",
-                           "property=wv0033",
-                           "property=wv1500", sep = "&")
-  rest.depths <- paste("&depth=0-5cm", "depth=0-30cm", "depth=5-15cm", 
-                       "depth=15-30cm", "depth=30-60cm", "depth=60-100cm", "depth=100-200cm", sep = "&")
-  rest.statistic <- paste("&value", statistic, sep = "=")
-  rest.query <- paste0(rest1, rest.properties, rest.depths, rest.statistic)
-  rest.data <- jsonlite::fromJSON(rest.query)
-  
-  #### Process query
-  sp.nms <- rest.data$properties$layers[["name"]]
-  
-  if(!identical(sp.nms, c("bdod", "cec", "clay", "nitrogen", "phh2o", "sand", "soc", "wv0010", "wv0033", "wv1500"))){
-    cat("Found these properties", sp.nms, "\n")
-    cat("Expected these properties", c("bdod", "cec", "clay", "nitrogen", "phh2o", "sand", "soc", "wv0010", "wv0033", "wv1500"), "\n")
-    stop("soil properties names do not match")
-  }
+
+
+
+  bdod <- NA
+  cec <- NA
+  clay <- NA
+  nitrogen <- NA
+  phh2o <- NA
+  sand <- NA
+  soc <- NA
+  wv0010 <- NA
+  wv0033 <- NA
+  wv1500 <- NA
+
+  if (api_or_image == "api") {
+    ##  rest0 <- "https://rest.soilgrids.org/soilgrids/v2.0/properties/query?lon="
+    rest0 <- "https://rest.isric.org/soilgrids/v2.0/properties/query?lon="
+    rest1 <- paste0(rest0, lon, "&lat=", lat)
+    rest.properties <- paste("&property=bdod", 
+                            "property=soc",
+                            "property=phh2o",
+                            "property=clay", 
+                            "property=sand", 
+                            "property=nitrogen",
+                            "property=cec", 
+                            "property=wv0010",
+                            "property=wv0033",
+                            "property=wv1500", sep = "&")
+    rest.depths <- paste("&depth=0-5cm", "depth=0-30cm", "depth=5-15cm", 
+                        "depth=15-30cm", "depth=30-60cm", "depth=60-100cm", "depth=100-200cm", sep = "&")
+    rest.statistic <- paste("&value", statistic, sep = "=")
+    rest.query <- paste0(rest1, rest.properties, rest.depths, rest.statistic)
+    rest.data <- jsonlite::fromJSON(rest.query)
     
-  bdod <- rest.data$properties$layers[1,3][[1]][,3]
-  cec <- rest.data$properties$layers[2,3][[1]][,3]
-  clay <- rest.data$properties$layers[3,3][[1]][,3]
-  nitrogen <- rest.data$properties$layers[4,3][[1]][,3]
-  phh2o <- rest.data$properties$layers[5,3][[1]][,3]
-  sand <- rest.data$properties$layers[6,3][[1]][,3]
-  soc <- rest.data$properties$layers[7,3][[1]][,3]
-  wv0010 <- rest.data$properties$layers[8,3][[1]][,3]
-  wv0033 <- rest.data$properties$layers[9,3][[1]][,3]
-  wv1500 <- rest.data$properties$layers[10,3][[1]][,3]
-  
+    #### Process query
+    sp.nms <- rest.data$properties$layers[["name"]]
+    
+    if(!identical(sp.nms, c("bdod", "cec", "clay", "nitrogen", "phh2o", "sand", "soc", "wv0010", "wv0033", "wv1500"))){
+      cat("Found these properties", sp.nms, "\n")
+      cat("Expected these properties", c("bdod", "cec", "clay", "nitrogen", "phh2o", "sand", "soc", "wv0010", "wv0033", "wv1500"), "\n")
+      stop("soil properties names do not match")
+    }
+
+    # merda <<- rest.data
+
+    bdod <- rest.data$properties$layers[1,3][[1]][,3]
+    cec <- rest.data$properties$layers[2,3][[1]][,3]
+    clay <- rest.data$properties$layers[3,3][[1]][,3]
+    nitrogen <- rest.data$properties$layers[4,3][[1]][,3]
+    phh2o <- rest.data$properties$layers[5,3][[1]][,3]
+    sand <- rest.data$properties$layers[6,3][[1]][,3]
+    soc <- rest.data$properties$layers[7,3][[1]][,3]
+    wv0010 <- rest.data$properties$layers[8,3][[1]][,3]
+    wv0033 <- rest.data$properties$layers[9,3][[1]][,3]
+    wv1500 <- rest.data$properties$layers[10,3][[1]][,3]
+
+    # teste <- data.frame(bdod = bdod, cec = cec, clay = clay, nitrogen = nitrogen, phh2o = phh2o, sand = sand, soc = soc, wv0010 = wv0010, wv0033 = wv0033, wv1500 = wv1500)
+    # print(names(teste))
+    # print(head(teste, 10))
+  }
+  else if (api_or_image == "image") {
+    if (is.na(images_folder)) {
+      stop("images_folder cannot be null!")
+    }
+
+    ddd <- extract_from_files(images_folder, lon, lat)
+
+    bdod <- ddd$bdod
+    cec <- ddd$cec
+    clay <- ddd$clay
+    nitrogen <- ddd$nitrogen
+    phh2o <- ddd$phh2o
+    sand <- ddd$sand
+    soc <- ddd$soc
+    wv0010 <- ddd$wv0010
+    wv0033 <- ddd$wv0033
+    wv1500 <- ddd$wv1500
+
+    print(names(ddd))
+    print(head(ddd, 10))
+  }
+  else{
+    stop("Invalid api_or_image")
+  }
+
+
+
+
   if(any(is.na(soc))) stop("No soil data available for this location. Did you specify the coordinates correctly?")
 
   ## These are the default thicknesses in ISRIC
