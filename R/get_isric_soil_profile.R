@@ -2,15 +2,13 @@ library(terra)
 library(sf)
 
 
-
-
 extract_from_files <- function(images_folder, lon, lat) {
   files <- list.files(images_folder, pattern = ".tif", full.names = TRUE)
-  r <- rast(files)
+  r <- terra::rast(files)
   # r_proj <- project(r, "EPSG:152160")
 
   central_coords <- matrix(c(lon, lat), ncol = 2)
-  pixel_values <- extract(r, central_coords)
+  pixel_values <- raster::extract(r, central_coords)
   # pixel_values
 
   dd <- as.data.frame(t(pixel_values)) %>%
@@ -30,8 +28,8 @@ extract_from_files <- function(images_folder, lon, lat) {
       grepl("100-200cm", depth) ~ 7,
       .default = 0)
     ) %>%
-    arrange(dp) %>%
-    select(-dp)
+    dplyr::arrange(dp) %>%
+    dplyr::select(-dp)
 
   # dim(dd)
   # head(dd)
