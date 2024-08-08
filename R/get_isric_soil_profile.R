@@ -1,7 +1,3 @@
-library(terra)
-library(sf)
-
-
 extract_from_files <- function(images_folder, lon, lat) {
   files <- list.files(images_folder, pattern = ".tif", full.names = TRUE)
   r <- terra::rast(files)
